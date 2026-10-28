@@ -1,0 +1,57 @@
+[package]
+name = "adaptive-dock-icons"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "GPL-3.0-only"
+description = "Adaptive app icons for the COSMIC desktop dock"
+publish = false
+
+[lib]
+name = "adaptive_dock_icons"
+
+[dependencies]
+anyhow = "1.0.102"
+cctk = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit", rev = "c0cff4d" }
+cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols", default-features = false, features = ["client"], rev = "c0cff4d" }
+futures = "0.3"
+i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp", "ico"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic", default-features = false, features = ["applet", "applet-token", "dbus-config", "multi-window", "tokio", "wayland", "desktop-systemd-scope", "winit"] }
+memmap2 = "0.9.10"
+fastrand = "2.3.0"
+rust-embed = "8.11.0"
+rustix = { version = "1.1", features = ["fs", "process"] }
+rustc-hash = "2.1"
+switcheroo-control = { git = "https://github.com/pop-os/dbus-settings-bindings", rev = "eed01dd3609e90e3c8cd043656734c500956c793" }
+tokio = { version = "1.49.0", features = ["full"] }
+tracing-log = "0.2.0"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing = "0.1"
+url = "2.5.8"
+zbus = { version = "5.14.0", default-features = false, features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+resvg = { version = "0.45.1", default-features = false, features = ["raster-images"] }
+
+[patch."https://github.com/smithay/client-toolkit.git"]
+sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
+
+[patch."https://github.com/pop-os/cosmic-protocols"]
+cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols//", rev = "c0cff4d" }
+cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols//", rev = "c0cff4d" }
+
+[patch.crates-io]
+atspi = { git = "https://github.com/wash2/atspi", rev = "e1e6e8bcd781a3155a9ff7e0b1e5193e5587f94c" }
+atspi-common = { git = "https://github.com/wash2/atspi", rev = "e1e6e8bcd781a3155a9ff7e0b1e5193e5587f94c" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+panic = "abort"
+
+[profile.dev]
+debug = 0
+
+[dev-dependencies]
+tempfile = "3"

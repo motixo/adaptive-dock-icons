@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.motixo.AdaptiveDockIcons</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Adaptive Dock Icons</name>
+  <summary>Adaptive app icons for the COSMIC desktop dock</summary>
+  <description><p>An independent applet with uniform visual icon sizes. Existing circular and framed icons keep their shapes; freeform icons receive a background that follows the desktop theme.</p></description>
+  <developer id="io.github.motixo"><name>motixo</name></developer>
+  <url type="homepage">https://github.com/motixo/adaptive-dock-icons</url>
+  <launchable type="desktop-id">io.github.motixo.AdaptiveDockIcons.desktop</launchable>
+  <provides><id>com.system76.CosmicApplet</id><binary>adaptive-dock-icons</binary></provides>
+  <supports><control>keyboard</control><control>pointing</control></supports>
+  <categories><category>Utility</category></categories>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Name=Adaptive Dock Icons
+Comment=Launch apps with adaptive, uniform icons
+Type=Application
+Exec=adaptive-dock-icons
+Icon=io.github.motixo.AdaptiveDockIcons
+Terminal=false
+Categories=Utility;COSMIC;
+Keywords=COSMIC;Applet;Dock;Icons;
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-MinimizeApplet=5
+X-OverflowPriority=100
+X-OverflowMinSize=4
+X-HostWaylandDisplay=true

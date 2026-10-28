@@ -1,0 +1,9 @@
+/target/
+/build/
+/docs/
+.agents/
+.codex/
+skills/
+AGENTS.md
+AGENT.md
+SKILL.md

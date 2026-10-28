@@ -1,0 +1,14 @@
+Adaptive Dock Icons
+
+The App List, Wayland integration, configuration and translations originate from:
+https://github.com/pop-os/cosmic-applets
+Tag: epoch-1.10.0
+Commit: 406d1b7d627138fdf4078f654268d3d8774e50f1
+Copyright 2023–2026 System76 and COSMIC contributors.
+SPDX-License-Identifier: GPL-3.0-only
+
+This derivative has a separate executable, desktop entry, application ID and
+configuration namespace. Icon preparation and theme-aware frames were added;
+rendering arguments and unused upstream paths were simplified. Original copyright
+notices are retained in the source. This distribution contains only the App List
+component and its translations, rather than the full cosmic-applets workspace.
