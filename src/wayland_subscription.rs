@@ -4,7 +4,7 @@
 use cctk::{
     sctk::{output::OutputInfo, reexports::calloop},
     toplevel_info::ToplevelInfo,
-    wayland_client::protocol::wl_output::WlOutput,
+    wayland_client::{WEnum, protocol::wl_output::WlOutput},
     wayland_protocols::ext::{
         foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
         workspace::v1::client::ext_workspace_handle_v1::ExtWorkspaceHandleV1,
@@ -25,6 +25,42 @@ use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 use crate::wayland_handler::wayland_handler;
+use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_v1::ZcosmicToplelevelManagementCapabilitiesV1 as Capability;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToplevelCapabilities {
+    pub activate: bool,
+    pub minimize: bool,
+    pub close: bool,
+}
+
+impl From<Vec<WEnum<Capability>>> for ToplevelCapabilities {
+    fn from(capabilities: Vec<WEnum<Capability>>) -> Self {
+        Self {
+            activate: capabilities.contains(&WEnum::Value(Capability::Activate)),
+            minimize: capabilities.contains(&WEnum::Value(Capability::Minimize)),
+            close: capabilities.contains(&WEnum::Value(Capability::Close)),
+        }
+    }
+}
+
+impl ToplevelCapabilities {
+    pub fn can_toggle(self, focused: bool) -> bool {
+        if focused {
+            self.minimize
+        } else {
+            self.activate
+        }
+    }
+
+    pub fn supports(self, request: &ToplevelRequest) -> bool {
+        match request {
+            ToplevelRequest::Activate(_) => self.activate,
+            ToplevelRequest::Minimize(_) => self.minimize,
+            ToplevelRequest::Quit(_) => self.close,
+        }
+    }
+}
 
 pub static WAYLAND_RX: LazyLock<Mutex<Option<UnboundedReceiver<WaylandUpdate>>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -107,6 +143,7 @@ async fn start_listening(
 #[derive(Clone, Debug)]
 pub enum WaylandUpdate {
     Init(calloop::channel::Sender<WaylandRequest>),
+    Capabilities(ToplevelCapabilities),
     Finished,
     Toplevel(ToplevelUpdate),
     Workspace(Vec<ExtWorkspaceHandleV1>),

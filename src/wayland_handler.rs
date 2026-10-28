@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::wayland_subscription::{
-    OutputUpdate, ToplevelRequest, ToplevelUpdate, WaylandImage, WaylandRequest, WaylandUpdate,
+    OutputUpdate, ToplevelCapabilities, ToplevelRequest, ToplevelUpdate, WaylandImage,
+    WaylandRequest, WaylandUpdate,
 };
 use std::{
     os::{
         fd::{AsFd, FromRawFd, RawFd},
         unix::net::UnixStream,
     },
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard, mpsc},
+    time::{Duration, Instant},
 };
 
 use cctk::{
@@ -29,7 +31,7 @@ use cctk::{
     toplevel_info::{ToplevelInfoHandler, ToplevelInfoState},
     toplevel_management::{ToplevelManagerHandler, ToplevelManagerState},
     wayland_client::{
-        Connection, Dispatch, QueueHandle, WEnum,
+        Connection, Dispatch, Proxy, QueueHandle, WEnum,
         globals::registry_queue_init,
         protocol::{
             wl_buffer, wl_output,
@@ -68,9 +70,9 @@ struct AppData {
     seat_state: SeatState,
     shm_state: Shm,
     activation_state: Option<ActivationState>,
+    capabilities: ToplevelCapabilities,
+    capture_tx: mpsc::SyncSender<ExtForeignToplevelHandleV1>,
 }
-
-// Workspace and toplevel handling
 
 // Need to bind output globals just so workspace can get output events
 impl OutputHandler for AppData {
@@ -218,9 +220,14 @@ impl ToplevelManagerHandler for AppData {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: Vec<WEnum<zcosmic_toplevel_manager_v1::ZcosmicToplelevelManagementCapabilitiesV1>>,
+        capabilities: Vec<
+            WEnum<zcosmic_toplevel_manager_v1::ZcosmicToplelevelManagementCapabilitiesV1>,
+        >,
     ) {
-        // TODO capabilities could affect the options in the applet
+        self.capabilities = capabilities.into();
+        let _ = self
+            .tx
+            .unbounded_send(WaylandUpdate::Capabilities(self.capabilities));
     }
 }
 
@@ -271,15 +278,12 @@ impl ToplevelInfoHandler for AppData {
     }
 }
 
-// Screencopy handling
-
 #[derive(Default)]
 struct SessionInner {
     formats: Option<Formats>,
     res: Option<Result<(), WEnum<FailureReason>>>,
 }
 
-// TODO: dmabuf? need to handle modifier negotation
 #[derive(Default)]
 struct Session {
     condvar: Condvar,
@@ -294,7 +298,7 @@ struct SessionData {
 
 struct FrameData {
     frame_data: ScreencopyFrameData,
-    session: CaptureSession,
+    session: Arc<Session>,
 }
 
 impl Session {
@@ -309,12 +313,33 @@ impl Session {
 
     fn wait_while<F: FnMut(&SessionInner) -> bool>(
         &self,
+        timeout: Duration,
         mut f: F,
-    ) -> MutexGuard<'_, SessionInner> {
-        self.condvar
-            .wait_while(self.inner.lock().unwrap(), |data| f(data))
-            .unwrap()
+    ) -> anyhow::Result<MutexGuard<'_, SessionInner>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Capture state poisoned"))?;
+        let (inner, _) = self
+            .condvar
+            .wait_timeout_while(inner, timeout, |data| f(data))
+            .map_err(|_| anyhow::anyhow!("Capture state poisoned"))?;
+        anyhow::ensure!(!f(&inner), "Capture timed out");
+        Ok(inner)
     }
+}
+
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_CAPTURE_BYTES: u32 = 128 * 1024 * 1024;
+
+fn capture_buffer_len(width: u32, height: u32) -> Option<u32> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    width
+        .checked_mul(height)?
+        .checked_mul(4)
+        .filter(|&len| len <= MAX_CAPTURE_BYTES)
 }
 
 impl ScreencopySessionDataExt for SessionData {
@@ -363,58 +388,41 @@ struct CaptureData {
 impl CaptureData {
     pub fn capture_source_shm_fd<Fd: AsFd>(
         &self,
-        overlay_cursor: bool,
         source: &ExtForeignToplevelHandleV1,
         fd: Fd,
-        len: Option<u32>,
-    ) -> Option<ShmImage<Fd>> {
-        // XXX error type?
-        // TODO: way to get cursor metadata?
-
-        #[allow(unused_variables)] // TODO
-        let overlay_cursor = if overlay_cursor { 1 } else { 0 };
-
+    ) -> anyhow::Result<ShmImage<Fd>> {
+        let deadline = Instant::now() + CAPTURE_TIMEOUT;
         let session = Arc::new(Session::default());
-        // Unwrap assumes compositor supports this capture type
-        let capture_session = self
-            .capturer
-            .create_session(
-                &CaptureSource::Toplevel(source.clone()),
-                CaptureOptions::empty(),
-                &self.qh,
-                SessionData {
-                    session: session.clone(),
-                    session_data: ScreencopySessionData::default(),
-                },
-            )
-            .unwrap();
-        self.conn.flush().unwrap();
+        let capture_session = self.capturer.create_session(
+            &CaptureSource::Toplevel(source.clone()),
+            CaptureOptions::empty(),
+            &self.qh,
+            SessionData {
+                session: session.clone(),
+                session_data: ScreencopySessionData::default(),
+            },
+        )?;
+        self.conn.flush()?;
 
-        let formats = session
-            .wait_while(|data| data.formats.is_none())
-            .formats
-            .take()
-            .unwrap();
+        let formats = {
+            let mut inner = session
+                .wait_while(deadline.saturating_duration_since(Instant::now()), |data| {
+                    data.formats.is_none() && data.res.is_none()
+                })?;
+            anyhow::ensure!(inner.res.is_none(), "Capture stopped before initialization");
+            inner
+                .formats
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Missing capture formats"))?
+        };
         let (width, height) = formats.buffer_size;
-
-        if width == 0 || height == 0 {
-            return None;
-        }
-
-        // XXX
-        if !formats.shm_formats.contains(&wl_shm::Format::Abgr8888) {
-            tracing::error!("No suitable buffer format found");
-            tracing::warn!("Available formats: {:#?}", formats);
-            return None;
-        }
-
-        let buf_len = width * height * 4;
-        if let Some(len) = len {
-            if len != buf_len {
-                return None;
-            }
-        } else if let Err(_err) = rustix::fs::ftruncate(&fd, buf_len.into()) {
-        }
+        anyhow::ensure!(
+            formats.shm_formats.contains(&wl_shm::Format::Abgr8888),
+            "No supported shared-memory format"
+        );
+        let buf_len = capture_buffer_len(width, height)
+            .ok_or_else(|| anyhow::anyhow!("Capture exceeds memory limit: {width}x{height}"))?;
+        rustix::fs::ftruncate(&fd, buf_len.into())?;
         let pool = self
             .wl_shm
             .create_pool(fd.as_fd(), buf_len as i32, &self.qh, ());
@@ -434,27 +442,28 @@ impl CaptureData {
             &self.qh,
             FrameData {
                 frame_data: ScreencopyFrameData::default(),
-                session: capture_session.clone(),
+                session: session.clone(),
             },
         );
-        self.conn.flush().unwrap();
-
-        // TODO: wait for server to release buffer?
-        let res = session
-            .wait_while(|data| data.res.is_none())
-            .res
-            .take()
-            .unwrap();
-        pool.destroy();
+        let result = self
+            .conn
+            .flush()
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                let mut inner = session
+                    .wait_while(deadline.saturating_duration_since(Instant::now()), |data| {
+                        data.res.is_none()
+                    })?;
+                match inner.res.take() {
+                    Some(Ok(())) => Ok(()),
+                    reason => anyhow::bail!("Capture failed: {reason:?}"),
+                }
+            });
         buffer.destroy();
-
-        //std::thread::sleep(std::time::Duration::from_millis(16));
-
-        if res.is_ok() {
-            Some(ShmImage { fd, width, height })
-        } else {
-            None
-        }
+        pool.destroy();
+        let _ = self.conn.flush();
+        result?;
+        Ok(ShmImage { fd, width, height })
     }
 }
 
@@ -465,10 +474,19 @@ pub struct ShmImage<T: AsFd> {
 }
 
 impl<T: AsFd> ShmImage<T> {
-    pub fn image(&self) -> anyhow::Result<image::RgbaImage> {
+    pub fn thumbnail(&self) -> anyhow::Result<image::RgbaImage> {
         let mmap = unsafe { memmap2::Mmap::map(&self.fd.as_fd())? };
-        image::RgbaImage::from_raw(self.width, self.height, mmap.to_vec())
-            .ok_or_else(|| anyhow::anyhow!("ShmImage had incorrect size"))
+        let image =
+            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(self.width, self.height, &mmap[..])
+                .ok_or_else(|| anyhow::anyhow!("Capture buffer had incorrect size"))?;
+        let ratio = 256.0 / self.width.max(self.height) as f32;
+        let ratio = ratio.min(1.0);
+        Ok(image::imageops::resize(
+            &image,
+            (self.width as f32 * ratio).round().max(1.0) as u32,
+            (self.height as f32 * ratio).round().max(1.0) as u32,
+            image::imageops::FilterType::Lanczos3,
+        ))
     }
 }
 
@@ -484,55 +502,9 @@ impl AppData {
     }
 
     fn send_image(&self, handle: ExtForeignToplevelHandleV1) {
-        let tx = self.tx.clone();
-        let capture_data = CaptureData {
-            qh: self.queue_handle.clone(),
-            conn: self.conn.clone(),
-            wl_shm: self.shm_state.wl_shm().clone(),
-            capturer: self.screencopy_state.capturer().clone(),
-        };
-        std::thread::spawn(move || {
-            let name = c"app-list-screencopy";
-            let Ok(fd) = rustix::fs::memfd_create(name, rustix::fs::MemfdFlags::CLOEXEC) else {
-                tracing::error!("Failed to get fd for capture");
-                return;
-            };
-
-            // XXX is this going to use to much memory?
-            let img = capture_data.capture_source_shm_fd(false, &handle, fd, None);
-            if let Some(img) = img {
-                let Ok(img) = img.image() else {
-                    tracing::error!("Failed to get RgbaImage");
-                    return;
-                };
-
-                // resize to 256x256
-                let max = img.width().max(img.height());
-                let ratio = max as f32 / 256.0;
-
-                let img = if ratio > 1.0 {
-                    let new_width = (img.width() as f32 / ratio).round();
-                    let new_height = (img.height() as f32 / ratio).round();
-
-                    image::imageops::resize(
-                        &img,
-                        new_width as u32,
-                        new_height as u32,
-                        image::imageops::FilterType::Lanczos3,
-                    )
-                } else {
-                    img
-                };
-
-                if let Err(err) =
-                    tx.unbounded_send(WaylandUpdate::Image(handle, WaylandImage::new(img)))
-                {
-                    tracing::error!("Failed to send image event to subscription {err:?}");
-                }
-            } else {
-                tracing::error!("Failed to capture image");
-            }
-        });
+        if let Err(error) = self.capture_tx.try_send(handle) {
+            tracing::warn!(%error, "Could not queue window preview");
+        }
     }
 }
 
@@ -567,7 +539,7 @@ impl ScreencopyHandler for AppData {
         _frame: Frame,
     ) {
         let session = &screencopy_frame.data::<FrameData>().unwrap().session;
-        Session::for_session(session).unwrap().update(|data| {
+        session.update(|data| {
             data.res = Some(Ok(()));
         });
     }
@@ -579,14 +551,17 @@ impl ScreencopyHandler for AppData {
         screencopy_frame: &CaptureFrame,
         reason: WEnum<FailureReason>,
     ) {
-        // TODO send message to thread
         let session = &screencopy_frame.data::<FrameData>().unwrap().session;
-        Session::for_session(session).unwrap().update(|data| {
+        session.update(|data| {
             data.res = Some(Err(reason));
         });
     }
 
-    fn stopped(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _session: &CaptureSession) {}
+    fn stopped(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, session: &CaptureSession) {
+        Session::for_session(session).unwrap().update(|data| {
+            data.res = Some(Err(WEnum::Value(FailureReason::Stopped)));
+        });
+    }
 }
 
 pub(crate) fn wayland_handler(
@@ -622,7 +597,7 @@ pub(crate) fn wayland_handler(
                 WaylandRequest::Screencopy(handle) => {
                     state.send_image(handle.clone());
                 }
-                WaylandRequest::Toplevel(req) => match req {
+                WaylandRequest::Toplevel(req) if state.capabilities.supports(&req) => match req {
                     ToplevelRequest::Activate(handle) => {
                         if let Some(cosmic_toplevel) = state.cosmic_toplevel(&handle)
                             && let Some(seat) = state.seat_state.seats().next()
@@ -644,6 +619,7 @@ pub(crate) fn wayland_handler(
                         }
                     }
                 },
+                WaylandRequest::Toplevel(_) => {}
                 WaylandRequest::TokenRequest {
                     app_id,
                     exec,
@@ -689,6 +665,7 @@ pub(crate) fn wayland_handler(
     }
     let registry_state = RegistryState::new(&globals);
 
+    let (capture_tx, capture_rx) = mpsc::sync_channel::<ExtForeignToplevelHandleV1>(32);
     let mut app_data = AppData {
         exit: false,
         tx,
@@ -703,7 +680,45 @@ pub(crate) fn wayland_handler(
         shm_state: Shm::bind(&globals, &qh).unwrap(),
         activation_state: ActivationState::bind::<AppData>(&globals, &qh).ok(),
         queue_handle: qh,
+        capabilities: ToplevelCapabilities::default(),
+        capture_tx,
     };
+
+    let capture_data = CaptureData {
+        qh: app_data.queue_handle.clone(),
+        conn: app_data.conn.clone(),
+        wl_shm: app_data.shm_state.wl_shm().clone(),
+        capturer: app_data.screencopy_state.capturer().clone(),
+    };
+    let image_tx = app_data.tx.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("dock-previews".into())
+        .spawn(move || {
+            for handle in capture_rx {
+                if !handle.is_alive() {
+                    continue;
+                }
+                let image =
+                    rustix::fs::memfd_create(c"dock-preview", rustix::fs::MemfdFlags::CLOEXEC)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|fd| capture_data.capture_source_shm_fd(&handle, fd))
+                        .and_then(|image| image.thumbnail());
+                match image {
+                    Ok(image) => {
+                        if image_tx
+                            .unbounded_send(WaylandUpdate::Image(handle, WaylandImage::new(image)))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "Could not capture window preview"),
+                }
+            }
+        })
+    {
+        tracing::error!(%error, "Could not start window preview worker");
+    }
 
     loop {
         if app_data.exit {
@@ -724,3 +739,52 @@ cctk::delegate_screencopy!(AppData);
 sctk::delegate_activation!(AppData, ExecRequestData);
 
 sctk::delegate_output!(AppData);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn capture_waits_end_on_stop_and_timeout() {
+        let session = Arc::new(Session::default());
+        let waiting = session.clone();
+        let thread = std::thread::spawn(move || {
+            let inner = waiting
+                .wait_while(Duration::from_secs(1), |data| {
+                    data.formats.is_none() && data.res.is_none()
+                })
+                .unwrap();
+            assert!(matches!(
+                inner.res,
+                Some(Err(WEnum::Value(FailureReason::Stopped)))
+            ));
+        });
+        session.update(|data| data.res = Some(Err(WEnum::Value(FailureReason::Stopped))));
+        thread.join().unwrap();
+        assert!(
+            Session::default()
+                .wait_while(Duration::ZERO, |data| data.res.is_none())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn previews_bound_memory_and_preserve_thin_windows() {
+        assert_eq!(capture_buffer_len(7680, 4320), Some(132_710_400));
+        for (width, height) in [(0, 1), (1, 0), (u32::MAX, 2), (16_384, 16_384)] {
+            assert!(capture_buffer_len(width, height).is_none());
+        }
+        let mut fd = tempfile::tempfile().unwrap();
+        fd.write_all(&[40, 80, 120, 255].repeat(1024)).unwrap();
+        let image = ShmImage {
+            fd,
+            width: 1024,
+            height: 1,
+        }
+        .thumbnail()
+        .unwrap();
+        assert_eq!(image.dimensions(), (256, 1));
+        assert_eq!(image.get_pixel(128, 0).0, [40, 80, 120, 255]);
+    }
+}
