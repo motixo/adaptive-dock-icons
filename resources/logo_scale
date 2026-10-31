@@ -1,0 +1,5 @@
+// Logo size inside applet-added frames, as a percentage of the default size.
+// 100 = original appearance; try 115 or 125 for less padding, 80 for more.
+// Frame and dock dimensions stay fixed. Changes apply live.
+// Enlargement stops at the frame's rounded corners; circular frames fit at 100.
+100

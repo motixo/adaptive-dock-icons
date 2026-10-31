@@ -565,9 +565,17 @@ impl CosmicAppList {
 
         let shape = prepared.map(|icon| icon.shape);
         let icon_size = app_icon.icon_size;
+        let logo_scale = self.config.logo_scale;
         let system_theme = self.core.system_theme().clone();
-        let decorate_icon =
-            move || icons::view(cosmic_icon.clone(), shape, icon_size, &system_theme);
+        let decorate_icon = move || {
+            icons::view(
+                cosmic_icon.clone(),
+                shape,
+                icon_size,
+                logo_scale,
+                &system_theme,
+            )
+        };
         let indicator = {
             let container = if toplevel_count <= 1 {
                 vertical_space().height(Length::Fixed(0.0))
@@ -2706,7 +2714,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_icon_size_live_preserves_pinned_item_identity() {
+    fn changing_appearance_live_preserves_pinned_item_identity() {
         use cosmic::Application;
 
         let mut app = CosmicAppList::default();
@@ -2719,8 +2727,10 @@ mod tests {
         });
         let mut config = app.config.clone();
         config.icon_size = 24;
+        config.logo_scale = 125;
         let _ = app.update(Message::ConfigUpdated(config));
         assert_eq!(app.config.icon_size, 24);
+        assert_eq!(app.config.logo_scale, 125);
         assert_eq!(app.pinned_list[0].id, 42);
     }
 

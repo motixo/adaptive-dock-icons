@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 pub const APP_ID: &str = "io.github.motixo.AdaptiveDockIcons";
 
+const fn default_logo_scale() -> u16 {
+    100
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub enum ToplevelFilter {
     #[default]
@@ -24,6 +28,9 @@ pub struct AppListConfig {
     /// Icon edge in logical pixels; zero follows the dock's suggested size.
     #[serde(default)]
     pub icon_size: u16,
+    /// Logo scale inside added frames, as a percentage of its default size.
+    #[serde(default = "default_logo_scale")]
+    pub logo_scale: u16,
 }
 
 impl Default for AppListConfig {
@@ -33,6 +40,7 @@ impl Default for AppListConfig {
             favorites: Vec::new(),
             enable_drag_source: true,
             icon_size: 0,
+            logo_scale: default_logo_scale(),
         }
     }
 }
@@ -73,8 +81,11 @@ pub fn load(config: &Config, original: Option<&Config>) -> AppListConfig {
         });
     if fresh && let Some(original) = original {
         let mut seed = AppListConfig::get_entry(original).unwrap_or_else(|(_, value)| value);
-        // A size configured before the first launch belongs to this applet.
+        // Appearance configured before the first launch belongs to this applet.
         seed.icon_size = config.get("icon_size").unwrap_or_default();
+        seed.logo_scale = config
+            .get("logo_scale")
+            .unwrap_or_else(|_| default_logo_scale());
         if let Err(error) = seed.write_entry(config) {
             tracing::error!(%error, "Could not save the initial Adaptive Dock Icons profile");
         }
@@ -128,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn first_launch_preserves_preconfigured_icon_size_while_seeding_pins() {
+    fn first_launch_preserves_preconfigured_appearance_while_seeding_pins() {
         use cosmic::cosmic_config::ConfigSet;
 
         let directory = tempfile::tempdir().unwrap();
@@ -141,8 +152,10 @@ mod tests {
         };
         stock.write_entry(&original).unwrap();
         own.set("icon_size", 24_u16).unwrap();
+        own.set("logo_scale", 125_u16).unwrap();
         let migrated = load(&own, Some(&original));
         assert_eq!(migrated.icon_size, 24);
+        assert_eq!(migrated.logo_scale, 125);
         assert_eq!(migrated.favorites, stock.favorites);
         assert_eq!(AppListConfig::get_entry(&own).unwrap(), migrated);
     }
@@ -155,6 +168,7 @@ mod tests {
         let config = Config::with_custom_path(APP_ID, 1, directory.path().to_owned()).unwrap();
         config.set("favorites", vec!["firefox"]).unwrap();
         assert_eq!(load(&config, None).icon_size, 0);
+        assert_eq!(load(&config, None).logo_scale, 100);
         for size in [24_u16, 40, 0] {
             config.set("icon_size", size).unwrap();
             assert_eq!(load(&config, None).icon_size, size);
@@ -171,5 +185,29 @@ mod tests {
         let fallback = load(&config, None);
         assert_eq!(fallback.icon_size, 0);
         assert_eq!(fallback.favorites, vec!["firefox"]);
+    }
+
+    #[test]
+    fn logo_scale_loads_changes_and_falls_back_without_losing_pins() {
+        use cosmic::cosmic_config::ConfigSet;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config::with_custom_path(APP_ID, 1, directory.path().to_owned()).unwrap();
+        config.set("favorites", vec!["firefox"]).unwrap();
+        for scale in [80_u16, 100, 125, u16::MAX] {
+            config.set("logo_scale", scale).unwrap();
+            assert_eq!(load(&config, None).logo_scale, scale);
+        }
+        let path = directory
+            .path()
+            .join("cosmic")
+            .join(APP_ID)
+            .join("v1/logo_scale");
+        for invalid in ["invalid", "-1", "65536"] {
+            std::fs::write(&path, invalid).unwrap();
+            let fallback = load(&config, None);
+            assert_eq!(fallback.logo_scale, 100);
+            assert_eq!(fallback.favorites, vec!["firefox"]);
+        }
     }
 }
