@@ -21,6 +21,9 @@ pub struct AppListConfig {
     pub filter_top_levels: Option<ToplevelFilter>,
     pub favorites: Vec<String>,
     pub enable_drag_source: bool,
+    /// Icon edge in logical pixels; zero follows the dock's suggested size.
+    #[serde(default)]
+    pub icon_size: u16,
 }
 
 impl Default for AppListConfig {
@@ -29,6 +32,7 @@ impl Default for AppListConfig {
             filter_top_levels: None,
             favorites: Vec::new(),
             enable_drag_source: true,
+            icon_size: 0,
         }
     }
 }
@@ -68,7 +72,9 @@ pub fn load(config: &Config, original: Option<&Config>) -> AppListConfig {
             )
         });
     if fresh && let Some(original) = original {
-        let seed = AppListConfig::get_entry(original).unwrap_or_else(|(_, value)| value);
+        let mut seed = AppListConfig::get_entry(original).unwrap_or_else(|(_, value)| value);
+        // A size configured before the first launch belongs to this applet.
+        seed.icon_size = config.get("icon_size").unwrap_or_default();
         if let Err(error) = seed.write_entry(config) {
             tracing::error!(%error, "Could not save the initial Adaptive Dock Icons profile");
         }
@@ -119,5 +125,51 @@ mod tests {
         let _ = load(&own, None);
         assert!(own.get::<Vec<String>>("favorites").is_err());
         assert_eq!(std::fs::read_to_string(invalid).unwrap(), "malformed");
+    }
+
+    #[test]
+    fn first_launch_preserves_preconfigured_icon_size_while_seeding_pins() {
+        use cosmic::cosmic_config::ConfigSet;
+
+        let directory = tempfile::tempdir().unwrap();
+        let original =
+            Config::with_custom_path(ORIGINAL_APP_ID, 1, directory.path().to_owned()).unwrap();
+        let own = Config::with_custom_path(APP_ID, 1, directory.path().to_owned()).unwrap();
+        let stock = AppListConfig {
+            favorites: vec!["firefox".into()],
+            ..Default::default()
+        };
+        stock.write_entry(&original).unwrap();
+        own.set("icon_size", 24_u16).unwrap();
+        let migrated = load(&own, Some(&original));
+        assert_eq!(migrated.icon_size, 24);
+        assert_eq!(migrated.favorites, stock.favorites);
+        assert_eq!(AppListConfig::get_entry(&own).unwrap(), migrated);
+    }
+
+    #[test]
+    fn existing_profiles_default_safely_and_read_icon_size_changes() {
+        use cosmic::cosmic_config::ConfigSet;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config::with_custom_path(APP_ID, 1, directory.path().to_owned()).unwrap();
+        config.set("favorites", vec!["firefox"]).unwrap();
+        assert_eq!(load(&config, None).icon_size, 0);
+        for size in [24_u16, 40, 0] {
+            config.set("icon_size", size).unwrap();
+            assert_eq!(load(&config, None).icon_size, size);
+        }
+        std::fs::write(
+            directory
+                .path()
+                .join("cosmic")
+                .join(APP_ID)
+                .join("v1/icon_size"),
+            "invalid",
+        )
+        .unwrap();
+        let fallback = load(&config, None);
+        assert_eq!(fallback.icon_size, 0);
+        assert_eq!(fallback.favorites, vec!["firefox"]);
     }
 }

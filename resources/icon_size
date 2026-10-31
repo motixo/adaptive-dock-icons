@@ -1,0 +1,4 @@
+// Icon edge in logical pixels, independent of dock dimensions.
+// 0 = dock default; try 24, 32 or 40. Changes apply live.
+// Values are limited to the space available inside the existing dock buttons.
+0

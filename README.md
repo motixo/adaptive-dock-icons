@@ -20,4 +20,22 @@ just install
 
 In **COSMIC Settings → Desktop → Dock → Applets**, replace **App Tray** with **Adaptive Dock Icons**.
 
+## Icon size
+
+Set the icon edge in logical pixels in
+`~/.config/cosmic/io.github.motixo.AdaptiveDockIcons/v1/icon_size`
+(or under `$XDG_CONFIG_HOME` if set). For example:
+
+```sh
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/cosmic/io.github.motixo.AdaptiveDockIcons/v1"
+mkdir -p "$config_dir"
+printf '32\n' > "$config_dir/icon_size"
+```
+
+Changes apply live. Use `0` for the dock's default icon size. Only the icons and
+their surrounding padding change; dock dimensions and button spacing stay the
+same. Large values are limited to the available space, and small values to the
+width of the running-window indicator (8 or 12 pixels). To start with the default
+configuration, copy [resources/icon_size](resources/icon_size) to that path.
+
 [GPL-3.0-only](LICENSE) · Based on COSMIC App List ([NOTICE](NOTICE)).

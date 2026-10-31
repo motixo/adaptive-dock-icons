@@ -145,6 +145,33 @@ impl AppletIconData {
             padding: padding.into(),
         }
     }
+
+    fn with_icon_size(mut self, requested: u16) -> Self {
+        if requested == 0 {
+            return self;
+        }
+
+        // Use the existing button padding as space for enlargement. Compensate
+        // on every edge so the button, dock, overflow and drop targets keep
+        // their original dimensions, including the running-window indicator.
+        let spare = self
+            .padding
+            .top
+            .min(self.padding.right)
+            .min(self.padding.bottom)
+            .min(self.padding.left)
+            .max(0.0);
+        let maximum = (f32::from(self.icon_size) + 2.0 * spare) as u16;
+        let minimum = self.bar_size.min(f32::from(self.icon_size)) as u16;
+        let size = requested.clamp(minimum, maximum);
+        let inset = (f32::from(self.icon_size) - f32::from(size)) / 2.0;
+        self.padding.top += inset;
+        self.padding.right += inset;
+        self.padding.bottom += inset;
+        self.padding.left += inset;
+        self.icon_size = size;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -522,7 +549,7 @@ impl CosmicAppList {
             .collect();
         let toplevel_count = filtered_toplevels.len();
 
-        let app_icon = AppletIconData::new(applet);
+        let app_icon = AppletIconData::new(applet).with_icon_size(self.config.icon_size);
         let roundness = self.core.system_theme().cosmic().corner_radii.into();
 
         let cosmic_icon =
@@ -1594,7 +1621,11 @@ impl cosmic::Application for CosmicAppList {
                 self.subscription_ctr += 1;
             }
             Message::ConfigUpdated(config) => {
+                let favorites_changed = self.config.favorites != config.favorites;
                 self.config = config;
+                if !favorites_changed {
+                    return Task::none();
+                }
                 for item in self.pinned_list.drain(..) {
                     if !item.toplevels.is_empty() {
                         self.active_list.push(item);
@@ -2615,6 +2646,82 @@ mod tests {
             original_app_id: info.app_id.clone(),
             toplevels: vec![(info, None)],
         }
+    }
+
+    #[test]
+    fn resizing_icons_keeps_actual_button_layout_in_every_dock_orientation() {
+        use iced::advanced::widget::Tree;
+
+        let renderer = cosmic::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+        let window = window::Id::unique();
+        let item = DockItem {
+            id: 1,
+            desktop_info: DesktopEntry::from_appid("test-icon".into()),
+            original_app_id: "test-icon".into(),
+            toplevels: Vec::new(),
+        };
+        for anchor in [
+            PanelAnchor::Top,
+            PanelAnchor::Bottom,
+            PanelAnchor::Left,
+            PanelAnchor::Right,
+        ] {
+            for size in [
+                Size::PanelSize(PanelSize::XS),
+                Size::PanelSize(PanelSize::S),
+                Size::PanelSize(PanelSize::M),
+                Size::PanelSize(PanelSize::L),
+                Size::PanelSize(PanelSize::XL),
+                Size::PanelSize(PanelSize::Custom(16)),
+                Size::PanelSize(PanelSize::Custom(80)),
+                Size::Hardcoded((40, 40)),
+            ] {
+                let mut app = CosmicAppList::default();
+                app.core.applet.anchor = anchor;
+                app.core.applet.size = size;
+                let bounds = |app: &CosmicAppList| {
+                    let mut element = app.item_icon(&item, window, false, false);
+                    let mut tree = Tree::new(element.as_widget());
+                    element
+                        .as_widget_mut()
+                        .layout(&mut tree, &renderer, &Limits::NONE)
+                        .bounds()
+                };
+                let original = bounds(&app);
+                let default_size = AppletIconData::new(&app.core.applet).icon_size;
+                for requested in [1, 16, 24, 32, 40, 64, u16::MAX, 0] {
+                    app.config.icon_size = requested;
+                    assert_eq!(bounds(&app), original, "{anchor:?}, {requested}");
+                    let icon = AppletIconData::new(&app.core.applet).with_icon_size(requested);
+                    if requested == 16 {
+                        assert!(icon.icon_size <= 16);
+                    } else if requested == u16::MAX {
+                        assert!(icon.icon_size >= default_size);
+                    } else if requested == 0 {
+                        assert_eq!(icon.icon_size, default_size);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_icon_size_live_preserves_pinned_item_identity() {
+        use cosmic::Application;
+
+        let mut app = CosmicAppList::default();
+        app.config.favorites.push("test-icon".into());
+        app.pinned_list.push(DockItem {
+            id: 42,
+            desktop_info: DesktopEntry::from_appid("test-icon".into()),
+            original_app_id: "test-icon".into(),
+            toplevels: Vec::new(),
+        });
+        let mut config = app.config.clone();
+        config.icon_size = 24;
+        let _ = app.update(Message::ConfigUpdated(config));
+        assert_eq!(app.config.icon_size, 24);
+        assert_eq!(app.pinned_list[0].id, 42);
     }
 
     #[test]
